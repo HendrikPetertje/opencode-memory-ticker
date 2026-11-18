@@ -20,9 +20,9 @@ Clone it (or add it as a git submodule) somewhere your OpenCode config can reach
 
 ```bash
 cd ~/.config/opencode
-git submodule add https://github.com/<your-user>/opencode-memory-ticker.git configured-plugins/memory-ticker
+git submodule add https://github.com/HendrikPetertje/opencode-memory-ticker.git configured-plugins/memory-ticker
 # or, without submodules:
-git clone https://github.com/<your-user>/opencode-memory-ticker.git configured-plugins/memory-ticker
+git clone https://github.com/HendrikPetertje/opencode-memory-ticker.git configured-plugins/memory-ticker
 ```
 
 There is no build step and no npm package: OpenCode loads the TypeScript
