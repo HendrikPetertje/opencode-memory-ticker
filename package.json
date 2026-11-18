@@ -6,6 +6,9 @@
     ".": "./index.ts",
     "./tui": "./tui.tsx"
   },
+  "scripts": {
+    "test": "bun test"
+  },
   "peerDependencies": {
     "@opencode/plugin": "^2.0.0",
     "@opentui/core": ">=0.6.6",

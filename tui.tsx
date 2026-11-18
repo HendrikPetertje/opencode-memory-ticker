@@ -11,6 +11,19 @@ import { RGBA, TextAttributes } from "@opentui/core";
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveGlobalDir } from "./config.ts";
+import {
+  addEntity,
+  addObservation,
+  addRelation,
+  edit as editLine,
+  formatRelation,
+  parseRelation,
+  readLines,
+  remove as removeLine,
+  writeLines,
+  type Line,
+  type Target,
+} from "./memory.ts";
 import { MemoryConfig } from "./rpc.ts";
 
 const FILE = "memory-current.jsonl";
@@ -70,7 +83,11 @@ const ACCENT = {
   project: ansi(3, "#f6c177"),
   entity: ansi(5, "#c4a7e7"),
   relation: ansi(6, "#ebbcba"),
+  /** Background of the selected row. */
+  surface: ansi(0, "#26233a"),
 };
+/** `dd`: two presses within this window. */
+const DOUBLE_TAP_MS = 600;
 const palette = (ctx: { theme: any }) => ({
   ...ACCENT,
   muted: ctx.theme.text.muted,
@@ -148,84 +165,212 @@ export default Plugin.define({
     const poll = setInterval(refresh, 5000);
     refresh();
 
-    const open = (title: string, icon: string, kind: "global" | "project", file: string | undefined) => {
-      const graph = load(file);
-      const obsCount = graph?.entities.reduce((n, e) => n + e.observations.length, 0) ?? 0;
+    type Row =
+      | { kind: "entity"; entity: Entity }
+      | { kind: "observation"; entity: Entity; index: number; text: string }
+      | { kind: "relations" }
+      | { kind: "relation"; relation: Relation };
+
+    const rowsOf = (graph: Graph): Row[] => {
+      const rows: Row[] = [];
+      for (const entity of graph?.entities ?? []) {
+        rows.push({ kind: "entity", entity });
+        entity.observations.forEach((text, index) => rows.push({ kind: "observation", entity, index, text }));
+      }
+      if (graph) rows.push({ kind: "relations" });
+      for (const relation of graph?.relations ?? []) rows.push({ kind: "relation", relation });
+      return rows;
+    };
+
+    const targetOf = (row: Row | undefined): Target | undefined => {
+      if (row?.kind === "entity") return { kind: "entity", name: row.entity.name };
+      if (row?.kind === "observation") return { kind: "observation", name: row.entity.name, index: row.index };
+      if (row?.kind === "relation") return { kind: "relation", from: row.relation.from, to: row.relation.to, relationType: row.relation.type };
+      return undefined;
+    };
+
+    const open = (title: string, icon: string, kind: "global" | "project", file: string | undefined, start = 0) => {
+      const reopen = (at: number) => open(title, icon, kind, file, at);
+      /** Runs a change on the file, reports problems, and reopens the dialog on `at`. */
+      const change = (at: number, mutate: (lines: Line[]) => Line[]) => {
+        try {
+          if (!file || !existsSync(file)) throw new Error("no memory file yet; let the agent store something first");
+          writeLines(file, mutate(readLines(file)));
+          refresh();
+        } catch (error) {
+          context.ui.toast.show({ variant: "error", title: "Memory", message: (error as Error).message ?? String(error) });
+        }
+        reopen(at);
+      };
+      const ask = (options: { title: string; description?: string; placeholder?: string; value?: string }) =>
+        context.ui.dialog.prompt(options).then((value) => value?.trim() || undefined);
+
       context.ui.dialog.show(() => {
         const ctx = usePlugin();
         const pal = () => palette(ctx);
         const dims = useTerminalDimensions();
         // Shrink to keep MODAL_MARGIN rows free above and below the dialog's background.
         const height = () => Math.max(MODAL_MIN, Math.min(26, dims().height - 2 * MODAL_MARGIN - DIALOG_CHROME));
-        type Scroll = {
-          scrollBy(delta: number, unit?: "viewport"): void;
-          scrollTo(position: number): void;
-          scrollHeight: number;
+        const graph = load(file);
+        const rows = rowsOf(graph);
+        const obsCount = graph?.entities.reduce((n, e) => n + e.observations.length, 0) ?? 0;
+        const [selected, setSelected] = createSignal(Math.max(0, Math.min(start, rows.length - 1)));
+        let scroll: { scrollTo(position: number): void } | undefined;
+        let pendingD = 0;
+        const move = (delta: number) => {
+          const next = Math.max(0, Math.min(rows.length - 1, selected() + delta));
+          setSelected(next);
+          scroll?.scrollTo(Math.max(0, next - Math.floor(height() / 3)));
         };
-        let scroll: Scroll | undefined;
-        // Vim motions only. The scrollbox is left unfocused so its built-in
-        // arrow/page/home/end keys stay inactive; the wheel still scrolls.
+        queueMicrotask(() => move(0));
+        const current = () => rows[selected()];
+
+        const remove = async () => {
+          const row = current();
+          const target = targetOf(row);
+          if (!target || row?.kind === "relations") return;
+          if (row?.kind === "entity") {
+            const ok = await context.ui.dialog.confirm({
+              title: `Delete ${row.entity.name}?`,
+              message: `Removes the entity, its ${row.entity.observations.length} observations and its relations.`,
+            });
+            if (!ok) return reopen(selected());
+          }
+          change(selected(), (lines) => removeLine(lines, target));
+        };
+
+        const edit = async () => {
+          const row = current();
+          const at = selected();
+          if (row?.kind === "observation") {
+            const value = await ask({ title: `Edit observation of ${row.entity.name}`, value: row.text });
+            return value ? change(at, (lines) => editLine(lines, targetOf(row)!, value)) : reopen(at);
+          }
+          if (row?.kind === "entity") {
+            const value = await ask({ title: "Rename entity", description: "Its relations follow the new name.", value: row.entity.name });
+            return value ? change(at, (lines) => editLine(lines, targetOf(row)!, value)) : reopen(at);
+          }
+          if (row?.kind === "relation") {
+            const value = await ask({ title: "Edit relation", description: "from --type--> to", value: formatRelation({ ...row.relation, relationType: row.relation.type }) });
+            const relation = value ? parseRelation(value) : undefined;
+            if (value && !relation) context.ui.toast.show({ variant: "error", title: "Memory", message: "Write it as: from --type--> to" });
+            return relation ? change(at, (lines) => editLine(lines, targetOf(row)!, relation)) : reopen(at);
+          }
+        };
+
+        /** On an entity or observation: a new observation. On relations: a new relation. Elsewhere: a new entity. */
+        const add = async () => {
+          const row = current();
+          const at = selected();
+          if (row?.kind === "entity" || row?.kind === "observation") {
+            const value = await ask({ title: `New observation for ${row.entity.name}` });
+            const end = rows.findIndex((r) => r.kind === "entity" && r.entity === row.entity) + row.entity.observations.length + 1;
+            return value ? change(end, (lines) => addObservation(lines, row.entity.name, value)) : reopen(at);
+          }
+          if (row?.kind === "relations" || row?.kind === "relation") {
+            const value = await ask({ title: "New relation", description: "from --type--> to", placeholder: "peter --develops--> opencode" });
+            const relation = value ? parseRelation(value) : undefined;
+            if (value && !relation) context.ui.toast.show({ variant: "error", title: "Memory", message: "Write it as: from --type--> to" });
+            return relation ? change(rows.length, (lines) => addRelation(lines, relation)) : reopen(at);
+          }
+          return addNewEntity();
+        };
+
+        const addNewEntity = async () => {
+          const at = selected();
+          const name = await ask({ title: "New entity", placeholder: "name" });
+          if (!name) return reopen(at);
+          const type = await ask({ title: `Type of ${name}`, placeholder: "person, project, tool, …" });
+          if (!type) return reopen(at);
+          const index = rows.findIndex((r) => r.kind === "relations");
+          change(index === -1 ? rows.length : index, (lines) => addEntity(lines, name, type));
+        };
+
+        // Vim motions; the scrollbox stays unfocused so only these keys move it (the wheel still scrolls).
         ctx.keymap.layer(() => ({
           mode: "global",
           priority: 10,
           commands: [
-            { bind: "j", run: () => scroll?.scrollBy(1) },
-            { bind: "k", run: () => scroll?.scrollBy(-1) },
-            { bind: "down", run: () => scroll?.scrollBy(1) },
-            { bind: "up", run: () => scroll?.scrollBy(-1) },
-            { bind: "ctrl+d", run: () => scroll?.scrollBy(0.5, "viewport") },
-            { bind: "ctrl+u", run: () => scroll?.scrollBy(-0.5, "viewport") },
-            { bind: "g", run: () => scroll?.scrollTo(0) },
-            { bind: "shift+g", run: () => scroll?.scrollTo(scroll!.scrollHeight) },
-            { bind: "home", run: () => scroll?.scrollTo(0) },
-            { bind: "end", run: () => scroll?.scrollTo(scroll!.scrollHeight) },
+            { bind: "j", run: () => move(1) },
+            { bind: "k", run: () => move(-1) },
+            { bind: "down", run: () => move(1) },
+            { bind: "up", run: () => move(-1) },
+            { bind: "ctrl+d", run: () => move(10) },
+            { bind: "ctrl+u", run: () => move(-10) },
+            { bind: "g", run: () => move(-100000) },
+            { bind: "shift+g", run: () => move(100000) },
+            { bind: "home", run: () => move(-100000) },
+            { bind: "end", run: () => move(100000) },
+            {
+              bind: "d",
+              run: () => {
+                const now = Date.now();
+                if (now - pendingD < DOUBLE_TAP_MS) {
+                  pendingD = 0;
+                  void remove();
+                } else pendingD = now;
+              },
+            },
+            { bind: "e", run: () => void edit() },
+            { bind: "a", run: () => void add() },
+            { bind: "shift+a", run: () => void addNewEntity() },
           ],
         }));
+
+        const marked = (index: number) => (index === selected() ? (ACCENT.surface as any) : undefined);
         return (
-        <box flexDirection="column" paddingLeft={2} paddingRight={2} height={height()}>
-          <box flexDirection="row" flexShrink={0} gap={1}>
-            <text fg={pal()[kind]} attributes={TextAttributes.BOLD}>{`${icon} ${title} memory`}</text>
-            <text fg={pal().muted}>
-              {graph
-                ? `${graph.entities.length} entities · ${obsCount} observations · ${graph.relations.length} relations`
-                : "no memory file"}
+          <box flexDirection="column" paddingLeft={2} paddingRight={2} height={height()}>
+            <box flexDirection="row" flexShrink={0} gap={1}>
+              <text fg={pal()[kind]} attributes={TextAttributes.BOLD}>{`${icon} ${title} memory`}</text>
+              <text fg={pal().muted}>
+                {graph
+                  ? `${graph.entities.length} entities · ${obsCount} observations · ${graph.relations.length} relations`
+                  : "no memory file"}
+              </text>
+            </box>
+            <box height={1} flexShrink={0} border={["top"]} borderColor={pal().muted} />
+            <scrollbox ref={(el: any) => (scroll = el)} flexGrow={1} flexBasis={0} minHeight={0}>
+              {rows.map((row, index) => {
+                if (row.kind === "entity") {
+                  return (
+                    <box flexDirection="row" gap={1} flexShrink={0} marginTop={index === 0 ? 0 : 1} backgroundColor={marked(index)} onMouseUp={() => setSelected(index)}>
+                      <text fg={pal().entity} attributes={TextAttributes.BOLD}>{`◆ ${row.entity.name}`}</text>
+                      <text fg={pal().muted}>{`[${row.entity.type}]`}</text>
+                    </box>
+                  );
+                }
+                if (row.kind === "observation") {
+                  return (
+                    <box flexDirection="row" paddingLeft={2} flexShrink={0} backgroundColor={marked(index)} onMouseUp={() => setSelected(index)}>
+                      <text fg={pal()[kind]} flexShrink={0}>{"› "}</text>
+                      <text fg={pal().text}>{row.text}</text>
+                    </box>
+                  );
+                }
+                if (row.kind === "relations") {
+                  return (
+                    <box flexShrink={0} marginTop={1} backgroundColor={marked(index)} onMouseUp={() => setSelected(index)}>
+                      <text fg={pal().relation} attributes={TextAttributes.BOLD}>{"⇄ Relations"}</text>
+                    </box>
+                  );
+                }
+                return (
+                  <box flexDirection="row" paddingLeft={2} flexShrink={0} backgroundColor={marked(index)} onMouseUp={() => setSelected(index)}>
+                    <text fg={pal().entity}>{row.relation.from}</text>
+                    <text fg={pal().muted}>{" ──"}</text>
+                    <text fg={pal().relation}>{` ${row.relation.type} `}</text>
+                    <text fg={pal().muted}>{"──▶ "}</text>
+                    <text fg={pal().entity}>{row.relation.to}</text>
+                  </box>
+                );
+              })}
+              {!graph && <text fg={pal().muted}>No memory file found.</text>}
+              {graph && graph.entities.length === 0 && <text fg={pal().muted}>Empty. Press shift+a to add an entity.</text>}
+            </scrollbox>
+            <text fg={pal().muted} flexShrink={0} wrapMode="word">
+              {"esc close · j/k move · g/G top/bottom · e edit · a add · A new entity · dd delete"}
             </text>
           </box>
-          <box height={1} flexShrink={0} border={["top"]} borderColor={pal().muted} />
-          <scrollbox ref={(el: any) => (scroll = el)} flexGrow={1} flexBasis={0} minHeight={0}>
-            {graph?.entities.map((e) => (
-              <box flexDirection="column" flexShrink={0} marginBottom={1}>
-                <box flexDirection="row" gap={1}>
-                  <text fg={pal().entity} attributes={TextAttributes.BOLD}>{`◆ ${e.name}`}</text>
-                  <text fg={pal().muted}>{`[${e.type}]`}</text>
-                </box>
-                {e.observations.map((o) => (
-                  <box flexDirection="row" paddingLeft={2} flexShrink={0}>
-                    <text fg={pal()[kind]} flexShrink={0}>{"› "}</text>
-                    <text fg={pal().text}>{o}</text>
-                  </box>
-                ))}
-              </box>
-            ))}
-            {graph && graph.relations.length > 0 && (
-              <box flexDirection="column" flexShrink={0}>
-                <text fg={pal().relation} attributes={TextAttributes.BOLD}>{"⇄ Relations"}</text>
-                {graph.relations.map((r) => (
-                  <box flexDirection="row" paddingLeft={2} flexShrink={0}>
-                    <text fg={pal().entity}>{r.from}</text>
-                    <text fg={pal().muted}>{" ──"}</text>
-                    <text fg={pal().relation}>{` ${r.type} `}</text>
-                    <text fg={pal().muted}>{"──▶ "}</text>
-                    <text fg={pal().entity}>{r.to}</text>
-                  </box>
-                ))}
-              </box>
-            )}
-            {!graph && <text fg={pal().muted}>No memory file found.</text>}
-            {graph && graph.entities.length === 0 && <text fg={pal().muted}>Empty.</text>}
-          </scrollbox>
-          <text fg={pal().muted} flexShrink={0}>{"esc close · j/k line · ctrl+d/u half page · g/G top/bottom"}</text>
-        </box>
         );
       });
       context.ui.dialog.set({ size: "xlarge", centered: true });

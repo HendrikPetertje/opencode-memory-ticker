@@ -71,6 +71,22 @@ Override them in `cli.json` under `keybinds`, by command id:
 }
 ```
 
+### In the memory dialog
+
+| Key | Does |
+|---|---|
+| `j` / `k` | move |
+| `g` / `G` | top / bottom |
+| `e` | edit the selected observation, rename the selected entity (its relations follow), or rewrite the selected relation |
+| `a` | on an entity or observation: add an observation to that entity. On the relations: add a relation. |
+| `A` | add an entity (name, then type) |
+| `dd` | delete the selected observation or relation; an entity (with its observations and relations) after a confirmation |
+| `esc` | close |
+
+Relations are written as `from --type--> to` (`from type to` works for a
+one-word type). Edits go straight to the memory file; the memory MCP server
+reads it fresh on every call, so the agent sees them right away.
+
 ## How it works
 
 - `index.ts` (server part) registers the `memory` MCP server and exposes the
@@ -78,6 +94,9 @@ Override them in `cli.json` under `keybinds`, by command id:
 - `tui.tsx` (TUI part) does not receive plugin options, so it asks the server
   part for the path over RPC (see `rpc.ts`), then reads the memory files to
   render the footer widget.
+- `memory.ts` edits the memory file for the dialog (`memory.test.ts`, run
+  with `bun test`). It keeps every line it doesn't know, keeps the server's
+  `_aim` marker first, and writes atomically.
 
 ## License
 
