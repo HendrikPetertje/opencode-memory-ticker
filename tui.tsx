@@ -171,10 +171,14 @@ export default Plugin.define({
           commands: [
             { bind: "j", run: () => scroll?.scrollBy(1) },
             { bind: "k", run: () => scroll?.scrollBy(-1) },
+            { bind: "down", run: () => scroll?.scrollBy(1) },
+            { bind: "up", run: () => scroll?.scrollBy(-1) },
             { bind: "ctrl+d", run: () => scroll?.scrollBy(0.5, "viewport") },
             { bind: "ctrl+u", run: () => scroll?.scrollBy(-0.5, "viewport") },
             { bind: "g", run: () => scroll?.scrollTo(0) },
             { bind: "shift+g", run: () => scroll?.scrollTo(scroll!.scrollHeight) },
+            { bind: "home", run: () => scroll?.scrollTo(0) },
+            { bind: "end", run: () => scroll?.scrollTo(scroll!.scrollHeight) },
           ],
         }));
         return (
