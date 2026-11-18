@@ -47,6 +47,10 @@ function projectDir(start: string | undefined): string | undefined {
 
 const ICON = { globe: "\uF0AC", folder: "\uF07B", folderOpen: "\uF115" };
 const COMPACT_BELOW = 100;
+const MODAL_MARGIN = 2;
+/** OpenCode's dialog adds one row of top padding around the plugin's content. */
+const DIALOG_CHROME = 1;
+const MODAL_MIN = 6;
 
 // Accent colours are terminal palette slots, so Ghostty's theme supplies them
 // and they follow its light/dark switch: 4 foam, 3 gold, 5 iris, 6 rose. The
@@ -150,6 +154,9 @@ export default Plugin.define({
       context.ui.dialog.show(() => {
         const ctx = usePlugin();
         const pal = () => palette(ctx);
+        const dims = useTerminalDimensions();
+        // Shrink to keep MODAL_MARGIN rows free above and below the dialog's background.
+        const height = () => Math.max(MODAL_MIN, Math.min(26, dims().height - 2 * MODAL_MARGIN - DIALOG_CHROME));
         type Scroll = {
           scrollBy(delta: number, unit?: "viewport"): void;
           scrollTo(position: number): void;
@@ -171,7 +178,7 @@ export default Plugin.define({
           ],
         }));
         return (
-        <box flexDirection="column" paddingLeft={2} paddingRight={2} height={26}>
+        <box flexDirection="column" paddingLeft={2} paddingRight={2} height={height()}>
           <box flexDirection="row" flexShrink={0} gap={1}>
             <text fg={pal()[kind]} attributes={TextAttributes.BOLD}>{`${icon} ${title} memory`}</text>
             <text fg={pal().muted}>
